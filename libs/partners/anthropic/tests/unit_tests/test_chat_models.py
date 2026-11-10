@@ -36,7 +36,12 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
-from langchain_core.messages.content import create_text_block
+from langchain_core.messages.content import (
+    ContentBlock,
+    create_file_block,
+    create_image_block,
+    create_text_block,
+)
 from langchain_core.outputs import ChatGenerationChunk
 from langchain_core.runnables import RunnableBinding
 from langchain_core.tools import BaseTool, tool
@@ -1814,6 +1819,63 @@ def test__format_messages_system_v1_content_blocks_drop_id() -> None:
     actual_system, actual_messages = _format_messages(messages, model=MODEL_NAME)
     assert actual_system == [{"type": "text", "text": "You are helpful."}]
     assert actual_messages == [{"role": "user", "content": "hi"}]
+
+
+def test__format_messages_tool_result_standard_blocks_drop_id() -> None:
+    """`ToolMessage` content built from standard blocks must not leak `id`.
+
+    MCP tool results are converted with `create_text_block` and friends, which
+    always mint an `lc_` id. Anthropic rejects that field inside `tool_result`
+    content with a 400 ("Extra inputs are not permitted").
+
+    See https://github.com/langchain-ai/langchain/issues/40483
+    """
+    tool_content: list[ContentBlock] = [
+        create_text_block("test result"),
+        create_image_block(base64="iVBORw==", mime_type="image/png"),
+        create_file_block(base64="JVBERi0=", mime_type="application/pdf"),
+    ]
+    original = copy.deepcopy(tool_content)
+    messages = [
+        HumanMessage("hi"),
+        AIMessage(
+            "",
+            tool_calls=[{"name": "fake_tool", "args": {}, "id": "toolu_01"}],
+        ),
+        ToolMessage(content_blocks=tool_content, tool_call_id="toolu_01"),
+    ]
+    _, actual_messages = _format_messages(messages, model=MODEL_NAME)
+    assert actual_messages[-1] == {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "content": [
+                    {"type": "text", "text": "test result"},
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "iVBORw==",
+                        },
+                    },
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": "JVBERi0=",
+                        },
+                    },
+                ],
+                "tool_use_id": "toolu_01",
+                "is_error": False,
+            },
+        ],
+    }
+    # The in-memory blocks keep their ids; only the outbound payload is narrowed.
+    assert tool_content == original
 
 
 def test__format_messages_system_text_block_preserves_supported_fields() -> None:
